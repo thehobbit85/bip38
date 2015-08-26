@@ -1,8 +1,9 @@
 var aes = require('browserify-aes')
 var assert = require('assert')
+var bs58check = require('bs58check')
 var createHash = require('create-hash')
-var cs = require('coinstring')
 var scrypt = require('scryptsy')
+var WIF = require('wif')
 var xor = require('buffer-xor')
 
 var ecurve = require('ecurve')
@@ -61,16 +62,11 @@ Bip38.prototype.encryptRaw = function (buffer, compressed, passphrase, saltAddre
   return Buffer.concat([prefix, salt, cipherText])
 }
 
-Bip38.prototype.encrypt = function (wif, passphrase, saltAddress) {
-  var d = cs.decode(wif).slice(1)
-  var compressed = (d.length === 33) && (d[32] === 0x01)
+Bip38.prototype.encrypt = function (string, passphrase, saltAddress) {
+  var decode = WIF.decode(this.versions.private, string)
+  var encrypted = this.encryptRaw(decode.d, decode.compressed, passphrase, saltAddress)
 
-  // truncate the compression flag
-  if (compressed) {
-    d = d.slice(0, -1)
-  }
-
-  return cs.encode(this.encryptRaw(d, compressed, passphrase, saltAddress))
+  return bs58check.encode(encrypted)
 }
 
 // some of the techniques borrowed from: https://github.com/pointbiz/bitaddress.org
@@ -122,21 +118,10 @@ Bip38.prototype.decryptRaw = function (encData, passphrase) {
 }
 
 Bip38.prototype.decrypt = function (encryptedBase58, passphrase) {
-  var encBuffer = cs.decode(encryptedBase58)
-  var decrypt = this.decryptRaw(encBuffer, passphrase)
+  var buffer = bs58check.decode(encryptedBase58)
+  var decrypt = this.decryptRaw(buffer, passphrase)
 
-  // Convert to WIF
-  var bufferLen = decrypt.compressed ? 34 : 33
-  var buffer = new Buffer(bufferLen)
-
-  buffer.writeUInt8(this.versions.private, 0)
-  decrypt.privateKey.copy(buffer, 1)
-
-  if (decrypt.compressed) {
-    buffer.writeUInt8(0x01, 33)
-  }
-
-  return cs.encode(buffer)
+  return WIF.encode(this.versions.private, decrypt.privateKey, decrypt.compressed)
 }
 
 Bip38.prototype.decryptECMult = function (encData, passphrase) {
@@ -200,10 +185,10 @@ Bip38.prototype.decryptECMult = function (encData, passphrase) {
 
   var seedBPart1 = xor(decipher2.read(), derivedHalf1.slice(0, 16))
   var seedB = Buffer.concat([seedBPart1, seedBPart2], 24)
-  var factorB = sha256x2(seedB)
+  var factorB = BigInteger.fromBuffer(sha256x2(seedB))
 
   // d = passFactor * factorB (mod n)
-  var d = passInt.multiply(BigInteger.fromBuffer(factorB)).mod(curve.n)
+  var d = passInt.multiply(factorB).mod(curve.n)
 
   return {
     privateKey: d.toBuffer(32),
@@ -214,16 +199,16 @@ Bip38.prototype.decryptECMult = function (encData, passphrase) {
 Bip38.prototype.verify = function (encryptedBase58) {
   var decoded
   try {
-    decoded = cs.decode(encryptedBase58)
+    decoded = bs58check.decode(encryptedBase58)
   } catch (e) {
     return false
   }
 
   if (decoded.length !== 39) return false
-  if (decoded.readUInt8(0) !== 0x01) return false
+  if (decoded[0] !== 0x01) return false
 
-  var type = decoded.readUInt8(1)
-  var flag = decoded.readUInt8(2)
+  var type = decoded[1]
+  var flag = decoded[2]
 
   // encrypted WIF
   if (type === 0x42) {
