@@ -4,6 +4,7 @@ var assert = require('assert')
 var bip38 = require('../')
 var bs58check = require('bs58check')
 var fixtures = require('./fixtures')
+var wif = require('wif')
 
 describe('bip38', function () {
   this.timeout(70000)
@@ -11,7 +12,9 @@ describe('bip38', function () {
   describe('decrypt', function () {
     fixtures.valid.forEach(function (f) {
       it('should decrypt ' + f.description, function () {
-        assert.equal(bip38.decrypt(f.bip38, f.passphrase), f.wif)
+        var result = bip38.decrypt(f.bip38, f.passphrase)
+
+        assert.equal(wif.encode(0x80, result.d, result.compressed), f.wif)
       })
     })
 

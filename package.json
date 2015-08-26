@@ -25,7 +25,8 @@
     "istanbul": "^0.2.11",
     "mocha": "^1.20.1",
     "mochify": "^2.1.1",
-    "standard": "^5.0.2"
+    "standard": "^5.0.2",
+    "wif": "^1.2.0"
   },
   "repository": {
     "url": "git@github.com:cryptocoinjs/bip38.git",

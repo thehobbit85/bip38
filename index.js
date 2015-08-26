@@ -173,7 +173,7 @@ function decryptECMult (buffer, passphrase) {
   var d = passInt.multiply(factorB).mod(curve.n)
 
   return {
-    privateKey: d.toBuffer(32),
+    d: d.toBuffer(32),
     compressed: compressed
   }
 }
