@@ -3,7 +3,6 @@ var assert = require('assert')
 var bs58check = require('bs58check')
 var createHash = require('create-hash')
 var scrypt = require('scryptsy')
-var WIF = require('wif')
 var xor = require('buffer-xor')
 
 var ecurve = require('ecurve')
@@ -11,130 +10,113 @@ var curve = ecurve.getCurveByName('secp256k1')
 
 var BigInteger = require('bigi')
 
+// specified by BIP38
+var scryptParams = {
+  N: 16384,
+  r: 8,
+  p: 8
+}
+
+var NULL = new Buffer(0)
+
 // SHA256(SHA256(buffer))
 function sha256x2 (buffer) {
   buffer = createHash('sha256').update(buffer).digest()
   return createHash('sha256').update(buffer).digest()
 }
 
-function Bip38 (versions) {
-  if (!(this instanceof Bip38)) return new Bip38()
-
-  // default to Bitcoin WIF versions
-  this.versions = versions || { private: 0x80 }
-
-  // BIP38 recommended
-  this.scryptParams = {
-    N: 16384,
-    r: 8,
-    p: 8
-  }
-}
-
-Bip38.prototype.encryptRaw = function (buffer, compressed, passphrase, saltAddress) {
-  assert.equal(buffer.length, 32, 'Invalid private key length')
+function encryptRaw (buffer, compressed, passphrase, saltAddress) {
+  if (buffer.length !== 32) throw new Error('Invalid private key length')
 
   var secret = new Buffer(passphrase, 'utf8')
   var salt = sha256x2(saltAddress).slice(0, 4)
 
-  var N = this.scryptParams.N
-  var r = this.scryptParams.r
-  var p = this.scryptParams.p
+  var N = scryptParams.N
+  var r = scryptParams.r
+  var p = scryptParams.p
 
   var scryptBuf = scrypt(secret, salt, N, r, p, 64)
   var derivedHalf1 = scryptBuf.slice(0, 32)
   var derivedHalf2 = scryptBuf.slice(32, 64)
 
   var xorBuf = xor(buffer, derivedHalf1)
-  var cipher = aes.createCipheriv('aes-256-ecb', derivedHalf2, new Buffer(0))
+  var cipher = aes.createCipheriv('aes-256-ecb', derivedHalf2, NULL)
   cipher.setAutoPadding(false)
   cipher.end(xorBuf)
 
   var cipherText = cipher.read()
 
-  // 0x01 + 0x42 + flagByte + salt + cipherText
-  var flagByte = compressed ? 0xe0 : 0xc0
-  var prefix = new Buffer(3)
-  prefix.writeUInt8(0x01, 0)
-  prefix.writeUInt8(0x42, 1)
-  prefix.writeUInt8(flagByte, 2)
+  // 0x01 | 0x42 | flagByte | salt (4) | cipherText (32)
+  var result = new Buffer(7 + 32)
+  result[0] = 0x01
+  result[1] = 0x42
+  result[2] = compressed ? 0xe0 : 0xc0
+  salt.copy(result, 3)
+  cipherText.copy(result, 7)
 
-  return Buffer.concat([prefix, salt, cipherText])
+  return result
 }
 
-Bip38.prototype.encrypt = function (string, passphrase, saltAddress) {
-  var decode = WIF.decode(this.versions.private, string)
-  var encrypted = this.encryptRaw(decode.d, decode.compressed, passphrase, saltAddress)
-
-  return bs58check.encode(encrypted)
+function encrypt (buffer, compressed, passphrase, saltAddress) {
+  return bs58check.encode(encryptRaw(buffer, compressed, passphrase, saltAddress))
 }
 
 // some of the techniques borrowed from: https://github.com/pointbiz/bitaddress.org
 // todo: (optimization) init buffer in advance, and use copy instead of concat
-Bip38.prototype.decryptRaw = function (encData, passphrase) {
+function decryptRaw (buffer, passphrase) {
   // 39 bytes: 2 bytes prefix, 37 bytes payload
-  assert.equal(encData.length, 39, 'Invalid BIP38 data length')
-
-  // first byte is always 0x01
-  assert.equal(encData.readUInt8(0), 0x01, 'Invalid BIP38 prefix')
+  if (buffer.length !== 39) throw new Error('Invalid BIP38 data length')
+  if (buffer[0] !== 0x01) throw new Error('Invalid BIP38 prefix')
 
   // check if BIP38 EC multiply
-  var type = encData.readUInt8(1)
-  if (type === 0x43) {
-    return this.decryptECMult(encData, passphrase)
-  }
+  var type = buffer[1]
+  if (type === 0x43) return decryptECMult(buffer, passphrase)
+  if (type !== 0x42) throw new Error('Invalid BIP38 type')
 
   passphrase = new Buffer(passphrase, 'utf8')
 
-  assert.equal(type, 0x42, 'Invalid BIP38 type')
-  var flagByte = encData.readUInt8(2)
+  var flagByte = buffer[2]
   var compressed = flagByte === 0xe0
+  if (!compressed && flagByte !== 0xc0) throw new Error('Invalid BIP38 compression flag')
 
-  if (!compressed) {
-    assert.equal(flagByte, 0xc0, 'Invalid BIP38 compression flag')
-  }
+  var N = scryptParams.N
+  var r = scryptParams.r
+  var p = scryptParams.p
 
-  var N = this.scryptParams.N
-  var r = this.scryptParams.r
-  var p = this.scryptParams.p
-
-  var addresshash = encData.slice(3, 7)
+  var addresshash = buffer.slice(3, 7)
   var scryptBuf = scrypt(passphrase, addresshash, N, r, p, 64)
   var derivedHalf1 = scryptBuf.slice(0, 32)
   var derivedHalf2 = scryptBuf.slice(32, 64)
 
-  var privKeyBuf = encData.slice(7, 7 + 32)
-  var decipher = aes.createDecipheriv('aes-256-ecb', derivedHalf2, new Buffer(0))
+  var privKeyBuf = buffer.slice(7, 7 + 32)
+  var decipher = aes.createDecipheriv('aes-256-ecb', derivedHalf2, NULL)
   decipher.setAutoPadding(false)
   decipher.end(privKeyBuf)
 
   var plainText = decipher.read()
-  var privateKey = xor(plainText, derivedHalf1)
+  var d = xor(plainText, derivedHalf1)
 
   return {
-    privateKey: privateKey,
+    d: d,
     compressed: compressed
   }
 }
 
-Bip38.prototype.decrypt = function (encryptedBase58, passphrase) {
-  var buffer = bs58check.decode(encryptedBase58)
-  var decrypt = this.decryptRaw(buffer, passphrase)
-
-  return WIF.encode(this.versions.private, decrypt.privateKey, decrypt.compressed)
+function decrypt (string, passphrase) {
+  return decryptRaw(bs58check.decode(string), passphrase)
 }
 
-Bip38.prototype.decryptECMult = function (encData, passphrase) {
+function decryptECMult (buffer, passphrase) {
   passphrase = new Buffer(passphrase, 'utf8')
-  encData = encData.slice(1) // FIXME: we can avoid this
+  buffer = buffer.slice(1) // FIXME: we can avoid this
 
-  var compressed = (encData[1] & 0x20) !== 0
-  var hasLotSeq = (encData[1] & 0x04) !== 0
+  var compressed = (buffer[1] & 0x20) !== 0
+  var hasLotSeq = (buffer[1] & 0x04) !== 0
 
-  assert.equal((encData[1] & 0x24), encData[1], 'Invalid private key.')
+  assert.equal((buffer[1] & 0x24), buffer[1], 'Invalid private key.')
 
-  var addresshash = encData.slice(2, 6)
-  var ownerEntropy = encData.slice(6, 14)
+  var addresshash = buffer.slice(2, 6)
+  var ownerEntropy = buffer.slice(6, 14)
   var ownerSalt
 
   // 4 bytes ownerSalt if 4 bytes lot/sequence
@@ -146,12 +128,12 @@ Bip38.prototype.decryptECMult = function (encData, passphrase) {
     ownerSalt = ownerEntropy
   }
 
-  var encryptedPart1 = encData.slice(14, 22) // First 8 bytes
-  var encryptedPart2 = encData.slice(22, 38) // 16 bytes
+  var encryptedPart1 = buffer.slice(14, 22) // First 8 bytes
+  var encryptedPart2 = buffer.slice(22, 38) // 16 bytes
 
-  var N = this.scryptParams.N
-  var r = this.scryptParams.r
-  var p = this.scryptParams.p
+  var N = scryptParams.N
+  var r = scryptParams.r
+  var p = scryptParams.p
   var preFactor = scrypt(passphrase, ownerSalt, N, r, p, 32)
 
   var passFactor
@@ -196,10 +178,10 @@ Bip38.prototype.decryptECMult = function (encData, passphrase) {
   }
 }
 
-Bip38.prototype.verify = function (encryptedBase58) {
+function verify (string) {
   var decoded
   try {
-    decoded = bs58check.decode(encryptedBase58)
+    decoded = bs58check.decode(string)
   } catch (e) {
     return false
   }
@@ -225,4 +207,11 @@ Bip38.prototype.verify = function (encryptedBase58) {
   return true
 }
 
-module.exports = Bip38
+module.exports = {
+  decrypt: decrypt,
+  decryptECMult: decryptECMult,
+  decryptRaw: decryptRaw,
+  encrypt: encrypt,
+  encryptRaw: encryptRaw,
+  verify: verify
+}
